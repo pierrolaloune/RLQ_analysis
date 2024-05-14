@@ -1,0 +1,591 @@
+---
+title: "Matrices RLQ"
+author: "Pierre Bouchet"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Charger les packages
+library(knitr)
+library(tidyr)
+library(dplyr)
+library(vegan)
+library(raster)
+library(sf)
+library(terra)
+library(gstat)
+library(sp)
+library(ggplot2)
+library(ade4)
+```
+
+# 1. Création des matrices environnementales (R)
+
+## 1.1. Création de la matrice pour les données de feu
+
+```{r, fig.align='center'}
+
+#FEU
+# Chargement du raster contenant les informations liées au feu
+feu_raster_interpol <- raster("C:/Qgis/feu_raster_interpolé_IDW.tif")
+plot(feu_raster_interpol) # Afficher le raster pour vérification visuelle
+# Nettoyage et préparation des données de plot
+plots_data <- read.csv("C:/R/STAGE/high_abundance_plots.csv")
+plots_data_clean <- plots_data %>%
+  dplyr::select(-X) %>%
+  group_by(PlotObservationID) %>%
+  distinct(PlotObservationID, Latitude, Longitude, .keep_all = TRUE)
+# Conversion du raster de 'RasterLayer' à 'SpatRaster' pour compatibilité avec 'terra'
+feu_raster_interpol <- rast(feu_raster_interpol)
+# Conversion des données de plot en 'SpatVector'
+coordinates(plots_data_clean) <- ~Longitude+Latitude
+crs(plots_data_clean) <- crs(feu_raster_interpol)
+plots_vector <- vect(plots_data_clean, geom=c("Longitude", "Latitude"), crs=crs(feu_raster_interpol))
+plot(plots_vector)  # Visualisation des points pour vérification
+# Extraction des valeurs du raster aux emplacements des points
+values <- terra::extract(feu_raster_interpol, plots_vector)
+#print(values)  # Afficher les valeurs extraites pour vérification
+# Création de la matrice environnementale
+tabR_matrix <- data.frame(
+  PlotObservationID = plots_vector$PlotObservationID, # Assurez-vous que cette colonne existe dans vos données
+  feu = values[[2]]  # Assurez-vous que ceci correspond à la structure de votre objet 'values'
+)
+# Conversion en matrice
+tabR <- as.matrix(tabR_matrix)
+#rownames(tabR) <- tabR_matrix$PlotObservationID
+# Impression de la structure de la matrice pour vérifier
+print(dim(tabR))
+print(head(tabR))
+```
+
+La première étape consiste à charger le raster interpolé représentant les données liées au feu, obtenues par interpolation IDW. L'Interpolation par Pondération Inverse à la Distance (IDW) est une méthode d'interpolation spatiale qui estime les valeurs d'une variable en des lieux non échantillonnés en se basant sur les valeurs des sites échantillonnés environnants. L'essence de l'IDW repose sur l'hypothèse que chaque point de mesure a une influence locale qui diminue avec l'augmentation de la distance par rapport au point d'estimation. l'IDW est souvent utilisée pour interpoler des données environnementales à partir de points de mesure discrets. L'objectif est de créer une surface continue qui peut être superposée sur des cartes ou intégrée dans des modèles écologiques pour analyser les impacts sur la biodiversité, la distribution des espèces, ou les risques environnementaux.
+
+La formule générale de l'IDW s'exprime comme suit :
+
+$$
+v(p) = \frac{\sum_{i=1}^{n} \left(\frac{w_i}{d_i^p}\right) v_i}{\sum_{i=1}^{n} \left(\frac{w_i}{d_i^p}\right)}
+$$
+
+où :
+
+- $v(p)$ est la valeur interpolée au point $p$,
+- $v_i$ sont les valeurs mesurées aux points de données,
+- $d_i$ est la distance entre le point $p$ et le point de données $i$,
+- $w_i$ est un poids attribué au point de données $i$,
+- $p$ est un paramètre qui détermine la pondération de la distance (souvent pris égal à 2).
+
+Attention : L'IDW peut être excessivement influencée par des valeurs aberrantes car elle ne prend pas en compte la tendance globale ou les configurations spatiales au-delà de la proximité immédiate. Comme l'IDW repose uniquement sur les données disponibles, les estimations près des limites de l'ensemble de données peuvent être moins précises en raison du manque de données environnantes dans certaines directions.
+
+Pour une analyse spatiale cohérente, il est crucial d'aligner le système de coordonnées des observations de terrain avec celui du raster. Les données de terrain sont converties en un vecteur spatial, et le système de coordonnées est harmonisé avec celui du raster. Les valeurs du raster interpolé sont extraites aux emplacements des points d'observation. Cette étape permet de récupérer les indices de feu correspondant précisément aux coordonnées de chaque plot. Les valeurs extraites sont intégrées dans une matrice environnementale (R), facilitant les analyses statistiques ultérieures. Chaque ligne représente un plot avec son identifiant et la valeur de feu associée.
+
+<br>
+
+## 1.2. Création de la matrice pour les données d'herbivorie
+
+<br>
+
+```{r, fig.align='center'}
+
+#HERBIVORIE
+# Lecture des données d'herbivorie
+herbivorie <- read.csv("Herbivory/list_herbivory.csv")
+# Agrégation des données par coordonnées géographiques avec arrondissement pour regrouper dans un rayon de 20km
+herbivorie_aggregated <- herbivorie %>%
+  mutate(
+    rounded_latitude = round(latitude / 0.1801802) * 0.1801802,
+    rounded_longitude = round(longitude / 0.2548133) * 0.2548133
+  ) %>%
+  group_by(rounded_latitude, rounded_longitude) %>%
+  summarise(number_of_herbivores = n(), .groups = 'drop')
+# Chargement et nettoyage des données de localisation des plots
+plots_data <- read.csv("C:/R/STAGE/high_abundance_plots.csv")
+plots_data_clean <- plots_data %>%
+  dplyr::select(-X) %>%
+  group_by(PlotObservationID) %>%
+  distinct(PlotObservationID, Latitude, Longitude, .keep_all = TRUE)
+# Arrondissement des coordonnées pour correspondance avec les données d'herbivorie
+plots_data_clean_rounded <- plots_data_clean %>%
+  mutate(
+    rounded_latitude = round(Latitude  / 0.1801802) * 0.1801802,
+    rounded_longitude = round(Longitude / 0.2548133) * 0.2548133
+  )
+# Jointure des données d'herbivorie avec les données de localisation des plots
+herbivorie_merged<- left_join(plots_data_clean_rounded, herbivorie_aggregated, by = c("rounded_latitude", "rounded_longitude"))
+# Chargement du raster CLC et extraction des codes d'habitat
+CLC_4326 <- rast("C:/R/STAGE/CLC_4326.tif")
+plot(CLC_4326)
+print(CLC_4326)
+coordinates(plots_data_clean_rounded) <- ~Longitude+Latitude
+crs(plots_data_clean_rounded) <- crs(CLC_4326)
+plots_vector <- vect(plots_data_clean_rounded, geom=c("Longitude", "Latitude"), crs=crs(CLC_4326))
+plot(plots_vector)
+habitat_values <- terra::extract(CLC_4326, plots_vector) #CLC_code pour mes Plots
+#herbivorie_merged_final<- left_join(tabR_matrix_herb, herbivorie_merged, by = "PlotObservationID")
+#Regarder le type d'habitat associé aux données d'herbivorie
+herbivorie <- read.csv("Herbivory/list_herbivory.csv")
+#Recharger plots_data_clean_rounded
+plots_data <- read.csv("C:/R/STAGE/high_abundance_plots.csv")
+plots_data_clean <- plots_data %>%
+  dplyr::select(-X) %>%
+  group_by(PlotObservationID) %>%
+  distinct(PlotObservationID, Latitude, Longitude, .keep_all = TRUE)
+plots_data_clean_rounded <- plots_data_clean %>%
+  mutate(
+    rounded_latitude = round(Latitude  / 0.1801802) * 0.1801802,
+    rounded_longitude = round(Longitude / 0.2548133) * 0.2548133
+  )
+herbivorie_merged_sf<- left_join(plots_data_clean_rounded, herbivorie_aggregated, by = c("rounded_latitude", "rounded_longitude"))
+coordinates(herbivorie_merged_sf) <- ~rounded_longitude+rounded_latitude
+crs(herbivorie_merged_sf) <- crs(CLC_4326)
+plots_vector_herb <- vect(herbivorie_merged_sf, geom=c("rounded_longitude", "rounded_latitude"), crs=crs(CLC_4326))
+herbivorie_values <- terra::extract(CLC_4326, plots_vector_herb) #Nombre_herbivores par CLC_code
+#Nombre d'herbivores par CLC habitats
+herbivorie_habitats <- data.frame(
+  number_of_herbivores = plots_vector_herb$number_of_herbivores, # Assurez-vous que cette colonne existe dans vos données
+  CLC_code = herbivorie_values[[2]]  # Assurez-vous que ceci correspond à la structure de votre objet 'values'
+)
+#Calcul des scores basés sur le maximum d'herbivores par habitat
+herbivorie_habitats <- na.omit(herbivorie_habitats)
+herbivorie_habitats <- herbivorie_habitats %>%
+  group_by(CLC_code) %>%
+  summarise(total_herbivores = sum(number_of_herbivores, na.rm = TRUE))
+min_herbivores <- min(herbivorie_habitats$total_herbivores)
+max_herbivores <- max(herbivorie_habitats$total_herbivores)
+print(min_herbivores)
+print(max_herbivores)
+herbivorie_habitats$score <- ((herbivorie_habitats$total_herbivores - min_herbivores) / (max_herbivores - min_herbivores)) * 100
+herbivorie_habitats$percentage <- (herbivorie_habitats$total_herbivores / max_herbivores) * 100
+cl_codes_full <- data.frame(
+  CLC_code = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44),
+  CLC_name = c(
+    "Urban fabric, continuous", "Urban fabric, discontinuous", "Industrial or commercial units", "Road and rail networks and associated land", "Port areas", "Airports",
+    "Mineral extraction sites", "Dump sites", "Construction sites", "Green urban areas", "Sport and leisure facilities",#11
+    "Non-irrigated arable land", "Permanently irrigated land", "Rice fields", "Vineyards", "Fruit trees and berry plantations", "Olive groves",
+    "Pastures", "Annual crops associated with permanent crops", "Complex cultivation patterns", "Agriculture land with vegetation", #21
+    "Agro-forestry areas", "Broad-leaved forest", "Coniferous forest", "Mixed forest", #25
+    "Natural grasslands", "Moors and heathland", "Sclerophyllous vegetation", "Transitional woodland-shrub", #29
+    "Beaches, dunes, sands", "Bare rocks", "Sparsely vegetated areas", "Burnt areas", "Glaciers and perpetual snow",#34
+    "Inland marshes", "Peatbogs", #36
+    "Salt marshes", "Salines", "Intertidal flats", #39
+    "Water courses", "Water bodies", "Coastal lagoons", "Estuaries", "Sea and ocean" #44
+  )
+)
+herbivorie_habitats <- merge(herbivorie_habitats, cl_codes_full, by = "CLC_code", all.x = TRUE)
+#Représentation graphique du nombre d'herbivore par habitat
+herbivorie_habitats_clean <- herbivorie_habitats %>%
+  arrange(desc(total_herbivores)) %>%
+  mutate(CLC_name = factor(CLC_name, levels = unique(CLC_name))) %>%
+  filter(total_herbivores > 100)
+ggplot(herbivorie_habitats_clean, aes(x = CLC_name, y = total_herbivores, fill = CLC_name)) +
+  geom_col(show.legend = FALSE) +  # On utilise geom_col et on cache la légende par défaut
+  coord_flip() +  # Inverser les axes pour mieux visualiser les étiquettes longues
+  scale_fill_viridis_d(begin = 0.3, direction = 1, option = "B") +  
+  theme_minimal()+
+  theme(
+    text = element_text(size = 12, family = "sans"),  # Police de caractère moderne
+    axis.title.y = element_blank(),  # Supprimer le titre de l'axe Y
+    axis.text.y = element_text(hjust = 1),  # Ajuster le texte de l'axe Y
+    legend.position = "left"  # Placer la légende à droite
+  ) +
+  labs(
+    x = "Type d'Habitat",
+    y = "Nombre d'Herbivores",
+    title = "Distribution des Herbivores par Habitat",
+    subtitle = "Données agrégées par zones de 20km",
+  )
+
+# Création de la matrice d'herbivorie
+tabR_matrix_herb <- data.frame(
+  PlotObservationID = plots_vector$PlotObservationID,
+  nb_herbivores = plots_vector_herb$number_of_herbivores,
+  CLC_code = habitat_values[[2]]
+)
+tabR_matrix_herb <- left_join(tabR_matrix_herb, herbivorie_habitats[, c("CLC_code", "score", "percentage")], by = "CLC_code")
+tabR_matrix_herb$nb_herbivores <- as.numeric(tabR_matrix_herb$nb_herbivores)
+tabR_matrix_herb$score <- as.numeric(tabR_matrix_herb$score)
+tabR_matrix_herb$percentage <- tabR_matrix_herb$nb_herbivores * tabR_matrix_herb$percentage
+
+#On met à jour tabR_matrix avec les données d'herbivorie
+tabR_matrix <- data.frame(
+    PlotObservationID = plots_vector$PlotObservationID, 
+    feu = values[[2]],
+    herbivorie = tabR_matrix_herb$score
+  )
+```
+<br>
+
+Les données d'herbivorie sont récoltées sur GBIF sur l'ensemble du bassin méditerranéen et sont agrégées par latitude et longitude pour chaque zone de 20km², en utilisant une transformation pour normaliser les positions géographiques. Cette agrégation permet de réduire les variations mineures dans les données de localisation et de se concentrer sur des tendances plus larges à l'échelle régionale.
+
+Ensuite, les types d'habitat sont extraits en utilisant une analyse spatiale avec un raster d'occupation des sols (CLC), permettant de relier chaque plot à un code d'habitat spécifique.
+
+Nous avons analysé l'herbivorie dans différents habitats en calculant des scores et des pourcentages basés sur le nombre d'herbivores par type d'habitat.
+Pour chaque habitat, un score est calculé en soustrayant le nombre minimal d'herbivores du nombre total d'herbivores de l'habitat, divisant le résultat par l'étendue des valeurs (max - min), et multipliant par 100 pour obtenir un score de 0 à 100. Ce score reflète l'intensité d'herbivorie en fonction des habitats. Par exemple, les habitats de forêts de conifères ont un score de 100 car c'est dans ce type d'habitats que l'on retrouve le plus d'herbivores vertébrés dans un rayon de 20km. Ce score mesure à la fois la quantité d'herbivores dans un habitat et la propension d'un habitat à abriter des herbivores.
+
+<br>
+
+## 1.3. Création de la matrice environnementale pour les données de couverture végétale
+
+<br>
+
+```{r, fig.align='center'}
+
+#COUVERT VEGETAL
+#On charge le raster Tree_cover_2019
+Tree_cover_2019 <- rast("C:/R/STAGE/Tree_cover_2019.tif")
+plot(Tree_cover_2019)
+#On charge les données de plots
+plots_data <- read.csv("C:/R/STAGE/high_abundance_plots.csv")
+plots_data_clean <- plots_data %>%
+  dplyr::select(-X) %>%
+  group_by(PlotObservationID) %>%
+  distinct(PlotObservationID, Latitude, Longitude, .keep_all = TRUE)
+# Conversion des données de plot en 'SpatVector'
+coordinates(plots_data_clean) <- ~Longitude+Latitude
+crs(plots_data_clean) <- crs(Tree_cover_2019)
+plots_vector_cover <- vect(plots_data_clean, geom=c("Longitude", "Latitude"), crs=crs(Tree_cover_2019))
+plot(plots_vector_cover)  # Visualisation des points pour vérification
+# Extraction des valeurs du raster aux emplacements des points
+cover_values <- terra::extract(Tree_cover_2019, plots_vector_cover)
+#print(cover_values)  # Afficher les valeurs extraites pour vérification
+# Création de la matrice environnementale
+tabR_matrix_cover <- data.frame(
+  PlotObservationID = plots_vector_cover$PlotObservationID, # Assurez-vous que cette colonne existe dans vos données
+  cover = cover_values[[2]]  # Assurez-vous que ceci correspond à la structure de votre objet 'values'
+)
+# Impression de la structure de la matrice pour vérifier
+#print(dim(tabR_matrix_cover))
+#print(head(tabR_matrix_cover))
+#On met à jour tabR_matrix avec les données de couverture forestière (Global Forest Watch)
+tabR_matrix <- data.frame(
+  PlotObservationID = plots_vector_cover$PlotObservationID, 
+  feu = values[[2]],
+  herbivorie = tabR_matrix_herb$score,
+  cover = cover_values[[2]]
+)
+
+```
+Les rasters de couverture arborée de 2019 fournis par le Global Forest Watch sont analysés pour quantifier la densité forestière sur différents sites. Ces rasters permettent d'évaluer l'étendue et la répartition des forêts à un niveau granulaire.
+
+Une matrice environnementale est élaborée pour rassembler les informations de couverture arborée associées à chaque plot. Cette matrice sert de base pour les analyses subséquentes visant à explorer les interactions entre la biodiversité des plots et leur environnement forestier.
+
+<br>
+
+## 1.4. Création de la matrice environnementale pour les données de sécheresse
+
+<br>
+
+
+```{r, fig.align='center'}
+
+#Sécheresse
+#Un proxy de la sécheresse en méditerranée c'est les précipitations durant les mois les plus humides, plus c'est bas plus la nappe se vide et sécheresse
+#Charger les données 
+bio16 <- rast("C:/R/STAGE/Worldclim/Annual/Bio_16_clipped.tif")
+plot(bio16)
+#On charge les données de plots
+plots_data <- read.csv("C:/R/STAGE/high_abundance_plots.csv")
+plots_data_clean <- plots_data %>%
+  dplyr::select(-X) %>%
+  group_by(PlotObservationID) %>%
+  distinct(PlotObservationID, Latitude, Longitude, .keep_all = TRUE)
+# Conversion des données de plot en 'SpatVector'
+coordinates(plots_data_clean) <- ~Longitude+Latitude
+crs(plots_data_clean) <- crs(bio16)
+plots_vector_drought <- vect(plots_data_clean, geom=c("Longitude", "Latitude"), crs=crs(bio16))
+plot(plots_vector_drought)  # Visualisation des points pour vérification
+# Extraction des valeurs du raster aux emplacements des points
+drought_values <- terra::extract(bio16, plots_vector_drought)
+#print(drought_values)  # Afficher les valeurs extraites pour vérification
+# Création de la matrice environnementale
+tabR_matrix_drought <- data.frame(
+  PlotObservationID = plots_vector_drought$PlotObservationID, # Assurez-vous que cette colonne existe dans vos données
+  cover = drought_values[[2]]  # Assurez-vous que ceci correspond à la structure de votre objet 'values'
+)
+# Impression de la structure de la matrice pour vérifier
+#print(dim(plots_vector_drought))
+#print(head(plots_vector_drought))
+#On met à jour tabR_matrix avec les données de sécheresse (Worldclim)
+tabR_matrix <- data.frame(
+  PlotObservationID = plots_vector_drought$PlotObservationID, 
+  feu = values[[2]],
+  herbivorie = tabR_matrix_herb$score,
+  cover = cover_values[[2]],
+  drought = drought_values[[2]]
+)
+tabR_matrix <- na.omit(tabR_matrix)
+rownames(tabR_matrix)<- tabR_matrix$PlotObservationID
+tabR_matrix$PlotObservationID = NULL
+tabR <- as.matrix(tabR_matrix)
+```
+
+L'étude s'est concentrée sur l'évaluation des impacts de la sécheresse dans la région méditerranéenne, en utilisant un proxy pour les conditions de sécheresse basé sur les schémas de précipitations pendant les mois les plus humides. La logique derrière cette approche est que des précipitations plus faibles pendant ces périodes indiquent une recharge réduite des aquifères, contribuant aux conditions de sécheresse (Raymond et al., 2016). Les données ont été recueillies à partir de la base de données WorldClim, une source reconnue fournissant des données climatiques globales à haute résolution. Cette base de données comprend diverses variables bioclimatiques, parmi lesquelles la précipitation du trimestre le plus humide (Bio16), qui est cruciale pour notre évaluation de la sécheresse.
+
+Le cœur de l'analyse spatiale a impliqué l'extraction des valeurs Bio16 correspondant aux emplacements spécifiques des plots de communauté. Ce processus d'extraction a associé chaque plot à sa valeur de raster respective, assignant une valeur de précipitation du trimestre le plus humide à chaque plot Les valeurs extraites ont ensuite été intégrées dans une matrice environnementale (R).
+
+# 2. Création des matrices espèces (L) et traits (Q)
+
+```{r}
+
+# Chargement des fichiers CSV contenant les données
+species_med_clean <- read.csv("C:/R/STAGE/species_med_clean.csv")
+species_per_plot <- read.csv("C:/R/STAGE/sPlot_woodiness.csv")
+Traits <- read.csv("C:/R/STAGE/traits_fr_sp_standardized.csv", header = T) #ATTENTION DEJA STAND
+#Ne garder que les espèces présentent aussi dans la matrice de traits
+species_per_plot <- species_per_plot[species_per_plot$Species %in% Traits$X, ] #we get the sites table with same species with L and Q
+#species_per_plot <- species_per_plot[species_per_plot$PlotObservationID %in% plots_data_clean$PlotObservationID, ] # and the same plot
+species_per_plot <- species_per_plot %>%
+  dplyr::select(PlotObservationID, Species)
+
+#Créer la matrice espèce_site (row = species)
+presence_matrix <- table(species_per_plot$Species, species_per_plot$PlotObservationID)
+Species <- (presence_matrix > 0) * 1
+tabL=Species
+tabL=decostand(Species,'hellinger')
+#par(mar=c(20,4,1,1))
+barplot(sort(apply(Species,2,sum),decreasing=T ),las=2,cex.names=0.4)
+tabL=tabL[,apply(Species,2,sum)>0]   #avoid empty columns (with only 0)
+
+#Créer la matrice espèce traits (row = species)
+tabQ=Traits
+species_in_tabL <- rownames(tabL) #Extraire les noms des espèces présentes dans tabL
+tabQ <- Traits %>% # Filtrer Traits pour inclure uniquement ces espèces, sans NA dans les données de trait
+  filter(X %in% species_in_tabL) %>% #X = Species
+  drop_na() #No NA
+tabQ <- na.omit(tabQ)
+#tabQ=decostand(tabQ,'stand',2) #Attention tabQ contient déja les données de traits standardisées sur les traits sud-africain
+tabQ <- tabQ %>% dplyr::select(X, everything()) # Assurer que 'X' est la première colonne si ce n'est pas déjà le cas. Cela est nécessaire pour définir les noms de lignes de la matrice correctement
+tabQ_matrix <- as.matrix(tabQ %>% dplyr::select(-X))# Définir les noms des lignes de la matrice à partir de la colonne 'X' et convertir le reste du dataframe en matrice
+rownames(tabQ_matrix) <- tabQ$X
+tabQ <- tabQ_matrix #Matrice finale
+
+# Finalisation et alignement des matrices pour l'analyse
+# Assurer que toutes les matrices utilisent les mêmes sites
+common_sites <- intersect(rownames(tabR), colnames(tabL))
+tabR <- tabR[common_sites, ]
+tabR <- as.matrix(tabR)
+tabL <- tabL[, common_sites]
+tabL <- as.matrix(tabL)
+# Affichage des premières lignes pour vérifier les matrices
+head(tabR)
+head(tabL[1,])
+head(tabQ)
+
+```
+
+Une matrice de présence d'espèces par site a été construite, transformant les données de présence en une matrice binaire où les lignes représentent les espèces et les colonnes les parcelles d'observation. Cette matrice a été ensuite transformée en utilisant la méthode de Hellinger pour améliorer l'analyse des données de composition.
+
+Les données de traits nettoyées ont été converties en une matrice où les lignes correspondent aux espèces et les colonnes aux différents traits. Les noms des espèces ont été assignés comme noms des lignes de la matrice pour faciliter les analyses ultérieures.
+
+# 3. Analyse RLQ
+
+```{r}
+
+#Analyse RLQ
+tabR=decostand(tabR,'stand',2)
+tabL <- t(tabL)
+
+dudiL = dudi.coa(tabL, scannf = FALSE, nf = 2)      
+dudiR = dudi.hillsmith(tabR, scannf = FALSE, nf = 2, row.w = dudiL$lw) 
+dudiQ = dudi.hillsmith(tabQ, scannf = FALSE, nf = 2, row.w = dudiL$cw) 
+summary(dudiL)
+summary(dudiR)
+summary(dudiQ)
+
+rlq1 <- rlq(dudiR, dudiL, dudiQ, scannf = FALSE, nf = 2)     # RLQ analysis
+plot(rlq1)       # look at the results: Eigenvalues, sites and species scores, traits scores, environment scores
+summary(rlq1)    # details of the results
+
+
+#------------------Better plots
+## Percentage of co-Inertia for each axis
+100*rlq1$eig/sum(rlq1$eig)
+## weighted correlations axes / env.
+wco=t(dudiR$tab)%*%(diag(dudiR$lw))%*%as.matrix(rlq1$mR)
+wco
+write.csv(wco,'wco.csv')
+## weighted correlations axes / traits.
+wca=t(dudiQ$tab)%*%(diag(dudiQ$lw))%*%as.matrix(rlq1$mQ)
+wca
+write.csv(wca,'wca.csv')
+
+## correlations traits / env.
+rlq1$tab
+  tutu=as.matrix(rlq1$tab)
+  write.csv(tutu,'tutu.csv' )
+  colfunc<-colorRampPalette(c("navyblue","turquoise1","lightyellow","darkorange",'red4'))
+ heatmap(tutu,scale='none',col = colfunc(256))
+
+# barplot(c(1,1,1,1,1),col=c("navyblue","turquoise1","lightyellow","darkorange",'red4'))
+#  Lab=c(rep('S',26),rep('P',26),rep('F',25),rep('C',25))
+#    boxplot(rlq1$mR[,1]~Lab)
+#    boxplot(rlq1$mR[,2]~Lab)
+# eigenvalues <- rlq1$eig
+#    barplot(eigenvalues, col="navyblue", main="Eigenvalues of RLQ Analysis", ylab="Eigenvalue", xlab="Axis")
+# 
+#    
+#    
+# # Plot  traits / env.
+# s.arrow(rlq1$c1, xlim=c(-1,1), boxes = FALSE)
+# s.label(rlq1$li*2, add.plot=T, clab=1.5,boxes=FALSE)
+# 
+# # Plot  traits / env.
+# plot(rlq1$lR)
+# 
+# # Species score
+# s.label(rlq1$lQ, clabel = 0)
+# par(mar = c(0.1, 0.1, 0.1, 0.1))
+# library(maptools)
+# pointLabel(rlq1$lQ,row.names(rlq1$lQ), cex=0.5)
+# text(rlq1$lQ,row.names(rlq1$lQ), cex=0.5)
+# 
+# # ---------------------------------------------- FOURTH CORNER METHOD
+toto=fourthcorner(as.data.frame(tabR),as.data.frame(tabL),as.data.frame(tabQ),nrepet=999,model=6,p.adjust.method.D="fdr",p.adjust.D='levels')
+toto
+plot(toto,alpha=0.05)
+# 
+# 
+# 
+# cwm.tab <- prop.table(as.matrix(tabL),1)%*%as.matrix(tabQ)   #calculate CWM values (community weighted mean values)
+# tabR=as.data.frame(tabR)
+# boxplot(as.data.frame(cwm.tab)$RS~tabR[,2])
+# 
+# 
+#   # Classification using these scores to obtain functional groups:
+# hc2 <- hclust(dist(rlq1$lQ), method = "ward.D2")
+# plot(hc2,hang=-1,cex=0.2)
+#    spe.group3 <- as.factor(cutree(hc2, k =3))
+#  spe.group5 <- as.factor(cutree(hc2, k =5))
+# 
+#  prop1= apply(Species[,spe.group5==1],1,sum)
+#  prop2= apply(Species[,spe.group5==2],1,sum)
+#  prop3= apply(Species[,spe.group5==3],1,sum)
+#  prop4= apply(Species[,spe.group5==4],1,sum)
+#  prop5= apply(Species[,spe.group5==5],1,sum)
+#  PROP=decostand(cbind(prop1,prop2,prop3,prop4,prop5),'tot',1)
+#  Val=aggregate(PROP,by=list(Lab),mean)
+#  TAB=Val[,2:6]
+#  rownames(TAB)= Val[,1]
+#  TAB=as.matrix(TAB)
+#  barplot(t(TAB))
+#  
+# 
+#  s.class(rlq1$lQ, spe.group5, col= 1:nlevels(spe.group5))
+#   s.arrow(rlq1$c1*4, add.plot = T,clab=0.8)
+# 
+# 
+# Lab=c(rep('S',40),rep('P',40),rep('F',40))
+# 
+#  
+#  
+#  cor.ratio <- function(X,Xfac, weights){
+#   nr <- nrow(X)
+#   if(nrow(Xfac) != nr)
+#     stop("non convenient dimension")
+#   if(length(weights) != nr)
+#     stop("non convenient dimension")
+#   
+#   weights <- weights/sum(weights)
+#   rcor <- matrix(0, ncol(Xfac), ncol(X))
+#   floc <- function(x, fac, weights) {
+#     xwt <- x * weights
+#     poicla <- unlist(tapply(weights, fac, sum))
+#     moytot <- sum(xwt)
+#     z <- unlist(tapply(xwt, fac, sum))/poicla
+#     return(sum(poicla * (z-moytot)^2)/sum(weights * (x-moytot)^2))
+#   }
+#   for(i in 1:ncol(Xfac)){
+#     for(j in 1:ncol(X)){
+#       rcor[i,j] <- floc(X[,j],Xfac[,i], weights)
+#     }
+#   }
+#   
+#   rcor <- data.frame(rcor)
+#   row.names(rcor) <- names(Xfac)
+#   names(rcor) <- names(X)
+#   return(sqrt(rcor))
+# }
+# 
+# # interpretation de la classification en terme de traits
+# 
+#   eta5 <- cor.ratio(tabQ, data.frame(spe.group5), weights = rep(1, length(spe.group5)))
+#   par(mfrow=n2mfrow(ncol(tabQ)),mar=c(2,2,1,1))  
+#  for(i in 1:ncol(tabQ)){
+# label <- paste(colnames(tabQ)[i], "(cor.ratio =", round(eta5[i],3), ")")
+# plot(tabQ[,i]~spe.group5, main = label, border = 1:nlevels(spe.group5),outline=F)
+# }
+#      par(mfrow=n2mfrow(ncol(tabQ)),mar=c(2,2,1,1))  
+#     for(i in 1:ncol(tabQ)){
+#     label <- paste(colnames(tabQ)[i])
+#      agg=as.data.frame(aggregate(na.omit(Traits [colnames(tabL),] )[,i],by=list(spe.group5),mean))
+#      #agg=as.data.frame(aggregate(tabQ[,i],by=list(spe.group3),mean))
+#      barplot(agg[,2]~agg[,1],main = label,outline=F,col=levels(spe.group5))
+#      } 
+
+
+```
+
+L'analyse RLQ est une technique statistique multivariée qui combine trois tableaux de données écologiques : R pour les données environnementales, L pour les données sur les espèces, et Q pour les traits des espèces. Cette méthode est conçue pour étudier les relations entre ces trois ensembles de variables. Le principe de l'analyse RLQ repose sur l'idée de corréler les tableaux de données par le biais d'une analyse d'ordination tripartite.
+
+## 3.1. Méthodologie de l'analyse RLQ
+
+### 3.1.1. Préparation des données
+
+Les tableaux R, L et Q sont préparés et standardisés. Pour R et Q, une standardisation centrée-réduite est souvent appliquée, où chaque variable est soustraite par sa moyenne et divisée par son écart-type, normalisant ainsi les données pour les rendre comparables. Le tableau L, contenant les données sur les espèces par site, est transposé, ce qui signifie que les espèces deviennent des colonnes et les sites des lignes.
+
+### 3.1.2. Analyse en Composantes Principales (ACP)
+
+Pour chaque tableau (R, L et Q), une Analyse en Composantes Principales (ACP) est réalisée pour réduire la dimensionnalité des données tout en conservant le maximum de variance. Cette étape est essentielle pour filtrer le bruit et mettre en évidence les structures sous-jacentes dans les données :
+- dudi.coa est utilisée pour L pour réaliser une ACP classique sur les données de présence-absence des espèces.
+- dudi.hillsmith est utilisée pour R et Q pour réaliser une ACP pondérée, prenant en compte les poids des lignes du tableau L, ce qui permet de tenir compte de la fréquence des espèces lors de l'analyse des variables environnementales et des traits.
+
+### 3.1.3. Lien entre les ordinations
+
+Une fois les ACP réalisées, l'analyse RLQ consiste à relier ces ordinations en maximisant la covariation entre les axes des trois analyses. Mathématiquement, cela implique de maximiser la somme des covariances entre les scores des espèces sur les axes de L, les variables environnementales sur les axes de R, et les traits des espèces sur les axes de Q.
+La formulation mathématique du critère RLQ est donnée par:
+$$
+C = \sum_{k = 1}^{p} \lambda_k = \mathrm{tr}(L^T D_R R R^T D_L L Q D_Q Q^T)
+$$
+
+où \( D_R \), \( D_L \), et \( D_Q \) sont des matrices diagonales de poids pour les tableaux \( R \), \( L \) et \( Q \) respectivement, et \( \lambda_k \) sont les valeurs propres résultant de la diagonalisation du produit des matrices.
+
+
+### 3.1.4. Résultats et interprétation
+
+Les résultats de l'analyse RLQ incluent les valeurs propres qui indiquent la quantité de covariation capturée par chaque axe tripartite, et les scores pour chaque site, espèce et trait sur ces axes. Ces scores peuvent être visualisés sous forme de graphiques pour interpréter les relations écologiques entre les environnements, les espèces et leurs traits.
+En résumé, l'analyse RLQ offre une méthode robuste pour explorer les interactions complexes entre les traits des espèces, leur abondance et l'environnement, en utilisant des techniques d'ordination qui révèlent les principales tendances et patterns dans les données multivariées. Cette méthode est particulièrement utile en écologie pour comprendre comment les caractéristiques des espèces influencent leur réponse aux conditions environnementales et vice versa.
+
+L'analyse RLQ produite fournit des informations détaillées sur la manière dont les variables environnementales (R), les espèces (L) et les traits des espèces (Q) interagissent dans un système écologique. 
+
+## 3.2. Détails des Résultats
+
+L'analyse RLQ a extrait quatre axes principaux, mais se concentre principalement sur les deux premiers axes qui expliquent la majorité de l'inertie projetée. Les deux premiers axes cumulent environ 90.62 % de l'inertie projetée, ce qui indique que la majorité des relations significatives entre les environnements, les espèces et leurs traits peuvent être capturées et interprétées à travers ces axes.
+
+### 3.2.1. Inertie totale
+
+L'inertie totale de l'analyse est de 0.2474. Cette valeur représente la variance totale dans les données qui peut être expliquée par l'analyse.
+
+### 3.2.2. Valeurs Propres (Eigenvalues)
+
+Les valeurs propres pour les axes 1 à 4 sont respectivement 0.2078, 0.0165, 0.0154, et 0.0078. Le premier axe domine largement, ce qui suggère que la majorité des interactions significatives sont capturées ici.
+
+### 3.2.3. Inertie Projetée (%)
+
+L'axe 1 explique 83.97% de l'inertie projetée, montrant qu'il capte une grande part des relations entre les variables étudiées. Les axes suivants ajoutent progressivement moins d'explication, avec l'axe 2 ajoutant 6.65%, ce qui cumule à 90.62% pour les deux premiers axes.
+
+### 3.2.4. Décomposition des valeurs propres
+
+La décomposition des valeurs propres montre des corrélations significatives sur l'axe 1 avec une corrélation de 0.223, indiquant une relation modérée entre les matrices R, L et Q sur cet axe.
+
+### 3.2.5. Inertie & Coïnertie R et Q
+
+Les analyses montrent que les ratios de l'inertie maximale possible sont assez élevés (plus de 82.5% pour Q et plus de 91.5% pour R sur les axes combinés), ce qui suggère que les modèles d'ordination sont efficaces pour capturer les relations entre les données environnementales et les traits.
+
+### 3.2.6. Corrélation avec L (dudiL)
+
+Les corrélations sur L sont relativement faibles, avec des valeurs de 0.223 et 0.103 sur les deux premiers axes. Cela peut indiquer que bien que les axes capturent des variations significatives, les traits spécifiques des espèces pourraient être influencés par d'autres facteurs non capturés dans cette analyse.
